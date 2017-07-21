@@ -17,6 +17,13 @@ const primitiveTypes = [
 
 const pp = Parser.prototype;
 
+const exportSuggestions = {
+  const: "declare export var",
+  let: "declare export var",
+  type: "export type",
+  interface: "export interface",
+};
+
 pp.flowParseTypeInitialiser = function (tok) {
   const oldInType = this.state.inType;
   this.state.inType = true;
@@ -104,7 +111,7 @@ pp.flowParseDeclareFunction = function (node) {
   return this.finishNode(node, "DeclareFunction");
 };
 
-pp.flowParseDeclare = function (node) {
+pp.flowParseDeclare = function (node, insideModule) {
   if (this.match(tt._class)) {
     return this.flowParseDeclareClass(node);
   } else if (this.match(tt._function)) {
@@ -119,11 +126,82 @@ pp.flowParseDeclare = function (node) {
     }
   } else if (this.isContextual("type")) {
     return this.flowParseDeclareTypeAlias(node);
+  } else if (this.isContextual("opaque")) {
+    return this.flowParseDeclareOpaqueType(node);
   } else if (this.isContextual("interface")) {
     return this.flowParseDeclareInterface(node);
+  } else if (this.match(tt._export)) {
+    return this.flowParseDeclareExportDeclaration(node, insideModule);
   } else {
     this.unexpected();
   }
+};
+
+pp.flowParseDeclareExportDeclaration = function (node, insideModule) {
+  this.expect(tt._export);
+
+  if (this.eat(tt._default)) {
+    if (this.match(tt._function) || this.match(tt._class)) {
+      // declare export default class ...
+      // declare export default function ...
+      node.declaration = this.flowParseDeclare(this.startNode());
+    } else {
+      // declare export default [type];
+      node.declaration = this.flowParseType();
+      this.semicolon();
+    }
+    node.default = true;
+
+    return this.finishNode(node, "DeclareExportDeclaration");
+  } else {
+    if (
+      this.match(tt._const) ||
+      this.match(tt._let) ||
+      ((this.isContextual("type") || this.isContextual("interface")) &&
+	!insideModule)
+    ) {
+      const label = this.state.value;
+      const suggestion = exportSuggestions[label];
+      this.unexpected(
+	this.state.start,
+	`\`declare export ${label}\` is not supported. Use \`${suggestion}\` instead`,
+      );
+    }
+
+    if (
+      this.match(tt._var) || // declare export var ...
+      this.match(tt._function) || // declare export function ...
+      this.match(tt._class) || // declare export class ...
+      this.isContextual("opaque") // declare export opaque ..
+    ) {
+      node.declaration = this.flowParseDeclare(this.startNode());
+      node.default = false;
+
+      return this.finishNode(node, "DeclareExportDeclaration");
+    } else if (
+      this.match(tt.star) || // declare export * from ''
+      this.match(tt.braceL) || // declare export {} ...
+      this.isContextual("interface") || // declare export interface ...
+      this.isContextual("type") // declare export type ...
+    ) {
+      node = this.parseExport(node);
+      if (node.type === "ExportNamedDeclaration") {
+	// flow does not support the ExportNamedDeclaration
+	// $FlowIgnore
+        node.type = "ExportDeclaration";
+	// $FlowFixMe
+        node.default = false;
+        delete node.exportKind;
+      }
+
+      // $FlowIgnore
+      node.type = "Declare" + node.type;
+
+      return node;
+    }
+  }
+
+  throw this.unexpected();
 };
 
 pp.flowParseDeclareVariable = function (node) {
@@ -184,6 +262,13 @@ pp.flowParseDeclareTypeAlias = function (node) {
   this.flowParseTypeAlias(node);
   return this.finishNode(node, "DeclareTypeAlias");
 };
+
+pp.flowParseDeclareOpaqueType = function (node) {
+  this.next();
+  this.flowParseOpaqueType(node, true);
+  return this.finishNode(node, "DeclareOpaqueType");
+};
+
 
 pp.flowParseDeclareInterface = function (node) {
   this.next();
@@ -262,6 +347,33 @@ pp.flowParseTypeAlias = function (node) {
   this.semicolon();
 
   return this.finishNode(node, "TypeAlias");
+};
+
+// Opaque type aliases
+
+pp.flowParseOpaqueType = function (node, declare) {
+  this.expectContextual("type");
+  node.id = this.flowParseRestrictedIdentifier();
+
+  if (this.isRelational("<")) {
+    node.typeParameters = this.flowParseTypeParameterDeclaration();
+  } else {
+    node.typeParameters = null;
+  }
+
+  // Parse the supertype
+  node.supertype = null;
+  if (this.match(tt.colon)) {
+    node.supertype = this.flowParseTypeInitialiser(tt.colon);
+  }
+
+  node.impltype = null;
+  if (!declare) {
+    node.impltype = this.flowParseTypeInitialiser(tt.eq);
+  }
+  this.semicolon();
+
+  return this.finishNode(node, "OpaqueType");
 };
 
 // Type annotations
@@ -905,7 +1017,12 @@ export default function (instance) {
     return function (node, expr) {
       if (expr.type === "Identifier") {
         if (expr.name === "declare") {
-          if (this.match(tt._class) || this.match(tt.name) || this.match(tt._function) || this.match(tt._var)) {
+          if (this.match(tt._class)
+            || this.match(tt.name)
+            || this.match(tt._function)
+            || this.match(tt._var)
+            || this.match(tt._export)
+          ) {
             return this.flowParseDeclare(node);
           }
         } else if (this.match(tt.name)) {
@@ -913,6 +1030,8 @@ export default function (instance) {
             return this.flowParseInterface(node);
           } else if (expr.name === "type") {
             return this.flowParseTypeAlias(node);
+          } else if (expr.name === "opaque") {
+            return this.flowParseOpaqueType(node, false);
           }
         }
       }
@@ -926,6 +1045,7 @@ export default function (instance) {
     return function () {
       return this.isContextual("type")
           || this.isContextual("interface")
+          || this.isContextual("opaque")
           || inner.call(this);
     };
   });
@@ -934,7 +1054,9 @@ export default function (instance) {
     return function () {
       if (
         this.match(tt.name) &&
-        (this.state.value === "type" || this.state.value === "interface")
+        (this.state.value === "type"
+        || this.state.value === "interface"
+        || this.state.value === "opaque")
       ) {
         return false;
       }
@@ -1013,6 +1135,13 @@ export default function (instance) {
           // export type Foo = Bar;
           return this.flowParseTypeAlias(declarationNode);
         }
+      } else if (this.isContextual("opaque")) {
+        node.exportKind = "type";
+
+        const declarationNode = this.startNode();
+        this.next();
+        // export opaque type Foo = Bar;
+        return this.flowParseOpaqueType(declarationNode, false);
       } else if (this.isContextual("interface")) {
         node.exportKind = "type";
         const declarationNode = this.startNode();
