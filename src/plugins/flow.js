@@ -17,13 +17,6 @@ const primitiveTypes = [
 
 const pp = Parser.prototype;
 
-const exportSuggestions = {
-  const: "declare export var",
-  let: "declare export var",
-  type: "export type",
-  interface: "export interface",
-};
-
 pp.flowParseTypeInitialiser = function (tok) {
   const oldInType = this.state.inType;
   this.state.inType = true;
@@ -111,7 +104,7 @@ pp.flowParseDeclareFunction = function (node) {
   return this.finishNode(node, "DeclareFunction");
 };
 
-pp.flowParseDeclare = function (node, insideModule) {
+pp.flowParseDeclare = function (node) {
   if (this.match(tt._class)) {
     return this.flowParseDeclareClass(node);
   } else if (this.match(tt._function)) {
@@ -131,74 +124,21 @@ pp.flowParseDeclare = function (node, insideModule) {
   } else if (this.isContextual("interface")) {
     return this.flowParseDeclareInterface(node);
   } else if (this.match(tt._export)) {
-    return this.flowParseDeclareExportDeclaration(node, insideModule);
+    return this.flowParseDeclareExportDeclaration(node);
   } else {
     this.unexpected();
   }
 };
 
-pp.flowParseDeclareExportDeclaration = function (node, insideModule) {
+pp.flowParseDeclareExportDeclaration = function (node) {
   this.expect(tt._export);
-
-  if (this.eat(tt._default)) {
-    if (this.match(tt._function) || this.match(tt._class)) {
-      // declare export default class ...
-      // declare export default function ...
-      node.declaration = this.flowParseDeclare(this.startNode());
-    } else {
-      // declare export default [type];
-      node.declaration = this.flowParseType();
-      this.semicolon();
-    }
-    node.default = true;
+  if (
+    this.isContextual("opaque") // declare export opaque ...
+  ) {
+    node.declaration = this.flowParseDeclare(this.startNode());
+    node.default = false;
 
     return this.finishNode(node, "DeclareExportDeclaration");
-  } else {
-    if (
-      this.match(tt._const) ||
-      this.match(tt._let) ||
-      ((this.isContextual("type") || this.isContextual("interface")) &&
-	!insideModule)
-    ) {
-      const label = this.state.value;
-      const suggestion = exportSuggestions[label];
-      this.unexpected(
-	this.state.start,
-	`\`declare export ${label}\` is not supported. Use \`${suggestion}\` instead`,
-      );
-    }
-
-    if (
-      this.match(tt._var) || // declare export var ...
-      this.match(tt._function) || // declare export function ...
-      this.match(tt._class) || // declare export class ...
-      this.isContextual("opaque") // declare export opaque ..
-    ) {
-      node.declaration = this.flowParseDeclare(this.startNode());
-      node.default = false;
-
-      return this.finishNode(node, "DeclareExportDeclaration");
-    } else if (
-      this.match(tt.star) || // declare export * from ''
-      this.match(tt.braceL) || // declare export {} ...
-      this.isContextual("interface") || // declare export interface ...
-      this.isContextual("type") // declare export type ...
-    ) {
-      node = this.parseExport(node);
-      if (node.type === "ExportNamedDeclaration") {
-	// flow does not support the ExportNamedDeclaration
-	// $FlowIgnore
-        node.type = "ExportDeclaration";
-	// $FlowFixMe
-        node.default = false;
-        delete node.exportKind;
-      }
-
-      // $FlowIgnore
-      node.type = "Declare" + node.type;
-
-      return node;
-    }
   }
 
   throw this.unexpected();
